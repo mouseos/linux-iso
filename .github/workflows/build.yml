@@ -1,0 +1,122 @@
+name: Build Bootable ISO
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential bison flex libssl-dev libelf-dev grub2 xorriso autoconf automake libtool pkg-config
+
+    - name: Clone Linux kernel
+      run: git clone --depth=1 https://github.com/torvalds/linux.git
+
+    - name: Clone BusyBox
+      run: git clone --depth=1 https://github.com/mirror/busybox.git
+
+    - name: Clone X Window System
+      run: git clone --depth=1 https://gitlab.freedesktop.org/xorg/xserver.git
+
+    - name: Clone IceWM
+      run: git clone --depth=1 https://github.com/bbidulock/icewm.git
+
+    - name: Build Linux kernel
+      run: |
+        cd linux
+        make defconfig
+        make -j$(nproc)
+        cp arch/x86/boot/bzImage ../boot/vmlinuz
+
+    - name: Build BusyBox
+      run: |
+        cd busybox
+        make defconfig
+        make -j$(nproc)
+        make install
+        cp -r _install/* ../rootfs/
+
+    - name: Build X Window System
+      run: |
+        cd xserver
+        ./autogen.sh
+        make -j$(nproc)
+        make install DESTDIR=../rootfs
+
+    - name: Build IceWM
+      run: |
+        cd icewm
+        ./autogen.sh
+        ./configure --prefix=/usr
+        make -j$(nproc)
+        make DESTDIR=../rootfs install
+
+    - name: Add custom files
+      run: |
+        mkdir -p rootfs/etc
+        mkdir -p rootfs/etc/init.d
+        mkdir -p rootfs/etc/skel
+        mkdir -p rootfs/etc/X11
+        mkdir -p rootfs/home/user
+        mkdir -p rootfs/proc
+        mkdir -p rootfs/sys
+        mkdir -p rootfs/dev
+        mkdir -p rootfs/tmp
+
+        # Add /etc/fstab
+        echo 'proc /proc proc defaults 0 0' > rootfs/etc/fstab
+        echo 'sysfs /sys sysfs defaults 0 0' >> rootfs/etc/fstab
+        echo 'tmpfs /tmp tmpfs defaults 0 0' >> rootfs/etc/fstab
+
+        # Add /etc/inittab
+        echo '::sysinit:/etc/init.d/rcS' > rootfs/etc/inittab
+        echo '::respawn:/sbin/getty 38400 tty1' >> rootfs/etc/inittab
+        echo '::ctrlaltdel:/sbin/reboot' >> rootfs/etc/inittab
+
+        # Add /etc/init.d/rcS
+        echo '#!/bin/sh' > rootfs/etc/init.d/rcS
+        echo 'mount -t proc proc /proc' >> rootfs/etc/init.d/rcS
+        echo 'mount -t sysfs sysfs /sys' >> rootfs/etc/init.d/rcS
+        echo 'mount -t tmpfs tmpfs /tmp' >> rootfs/etc/init.d/rcS
+        echo '/sbin/mdev -s' >> rootfs/etc/init.d/rcS
+        chmod +x rootfs/etc/init.d/rcS
+
+        # Add user and set up environment
+        echo 'user:x:1000:1000:User,,,:/home/user:/bin/sh' > rootfs/etc/passwd
+        echo 'user:x:1000:' > rootfs/etc/group
+        echo 'root:x:0:0:root:/root:/bin/sh' >> rootfs/etc/passwd
+        echo 'root:x:0:' >> rootfs/etc/group
+        echo 'user' | tee -a rootfs/etc/shadow
+
+        # Add X11 config
+        echo 'exec icewm-session' > rootfs/etc/X11/xinitrc
+        cp rootfs/etc/X11/xinitrc rootfs/home/user/.xinitrc
+
+    - name: Create bootable ISO
+      run: |
+        mkdir -p iso/boot/grub
+        cp boot/vmlinuz iso/boot/
+        echo 'set timeout=0' > iso/boot/grub/grub.cfg
+        echo 'set default=0' >> iso/boot/grub/grub.cfg
+        echo 'menuentry "Linux" {' >> iso/boot/grub/grub.cfg
+        echo '  linux /boot/vmlinuz' >> iso/boot/grub/grub.cfg
+        echo '}' >> iso/boot/grub/grub.cfg
+        grub-mkrescue -o bootable.iso iso
+
+    - name: Upload ISO
+      uses: actions/upload-artifact@v2
+      with:
+        name: bootable-iso
+        path: bootable.iso
